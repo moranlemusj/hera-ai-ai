@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # Models
     GEMINI_MODEL: str = "gemini-2.5-flash"
     GEMINI_PRO_MODEL: str = "gemini-2.5-pro"
-    EMBEDDING_MODEL: str = "text-embedding-004"
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
 
     # Run loop budgets
     ACCEPT_THRESHOLD: float = 0.7
@@ -50,7 +50,8 @@ class Settings(BaseSettings):
         "ads", "overlays", "maps", "others",
     ]
     SCRAPE_PAGE_SIZE: int = 24
-    SCRAPE_PACE_SECONDS: float = 0.25
+    SCRAPE_PACE_SECONDS: float = 0.3        # between Hera page fetches
+    SCRAPE_RECORD_PACE_SECONDS: float = 0.3  # between per-record upserts (paces Gemini embeds)
     SCRAPE_DEFAULT_PUBLIC: bool = True
 
     # Template search weights — must sum to 1.0
@@ -62,7 +63,7 @@ class Settings(BaseSettings):
     DATA_DIR: Path = Path(__file__).resolve().parent.parent / "data"
 
     @property
-    def RENDERS_DIR(self) -> Path:
+    def RENDERS_DIR(self) -> Path:  # noqa: N802 — uppercase to match the other settings constants
         return self.DATA_DIR / "renders"
 
 

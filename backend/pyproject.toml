@@ -52,6 +52,18 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "N", "SIM"]
 ignore = ["E501"]
+extend-safe-fixes = ["UP"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's Query/Path/Body/Depends/Header/Form are immutable sentinels — common in arg defaults.
+extend-immutable-calls = [
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Depends",
+    "fastapi.Header",
+    "fastapi.Form",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

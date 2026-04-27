@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from pgvector.psycopg import register_vector_async
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -17,6 +18,11 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations" / "versio
 _pool: AsyncConnectionPool | None = None
 
 
+async def _configure_connection(conn: AsyncConnection) -> None:
+    """Run on each new connection: register the pgvector type adapter."""
+    await register_vector_async(conn)
+
+
 async def get_pool() -> AsyncConnectionPool:
     global _pool
     if _pool is None:
@@ -26,6 +32,7 @@ async def get_pool() -> AsyncConnectionPool:
             max_size=8,
             timeout=30,
             kwargs={"autocommit": True},
+            configure=_configure_connection,
             open=False,
         )
         await _pool.open()

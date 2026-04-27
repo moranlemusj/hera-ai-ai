@@ -7,8 +7,10 @@ from importlib.metadata import version as pkg_version
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.admin import router as admin_router
 from app.config import settings
 from app.db import close_pool, get_pool, healthcheck, run_migrations
+from app.services.hera_dashboard import close_client as close_hera_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,7 +26,8 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     await run_migrations()
     log.info("Migrations done. Mock mode: %s", settings.HERA_MOCK)
     yield
-    log.info("Shutting down — closing DB pool")
+    log.info("Shutting down — closing DB pool and HTTP clients")
+    await close_hera_client()
     await close_pool()
 
 
@@ -41,6 +44,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(admin_router)
 
 
 @app.get("/health")
