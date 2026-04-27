@@ -1,0 +1,10 @@
+name: hera-agent
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - ffmpeg
+  - pip
+# Python packages are managed by uv from backend/pyproject.toml.
+# Inside this env: `uv sync` (or `uv pip install -e backend/`)
