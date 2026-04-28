@@ -44,12 +44,23 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 ```
 
-### 5. Run
+### 5. Run the backend
 
 ```bash
 conda activate hera-agent
 cd backend
-uvicorn app.main:app --reload --port 8000
+HERA_MOCK=1 uvicorn app.main:app --reload --port 8000   # mock mode while developing
 ```
 
 Hit [http://localhost:8000/health](http://localhost:8000/health) — should return `{"status": "ok", ...}` with both extensions present and migrations applied.
+
+### 6. Run the frontend (new terminal)
+
+```bash
+cd frontend
+npm install            # first time only
+npm run dev            # opens http://localhost:5173
+```
+
+The frontend proxies API calls to the backend, so use relative URLs in code.
+See [`frontend/README.md`](./frontend/README.md) for layout.
