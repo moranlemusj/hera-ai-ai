@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     HERA_MOCK: bool = Field(False, description="If true, returns canned mp4 URLs instead of calling Hera")
 
     # Quota guardrails — Hera plan is 200 videos / 100 images per month
-    MAX_RENDERS_PER_RUN: int = 6
+    MAX_RENDERS_PER_RUN: int = 4
     MONTHLY_RENDER_HARD_CAP: int = 200
     MONTHLY_RENDER_WARN_THRESHOLD: int = 180  # warn UI when within 20 of cap
 
@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     MAX_ATTEMPTS_PER_SHOT: int = 1  # bumped to 3 for v1 demo runs
     RESEARCH_BUDGET: int = 3
     MAX_REPLANS: int = 2
-    RENDER_TIMEOUT_SECONDS: int = 180
+    RENDER_TIMEOUT_SECONDS: int = 90  # Hera renders can take 3-5 min on busy days, esp. complex templates
     POLL_INTERVAL_SECONDS: int = 5
 
     # Output defaults

@@ -25,7 +25,7 @@ async def _configure_connection(conn: AsyncConnection) -> None:
 
 async def get_pool() -> AsyncConnectionPool:
     global _pool
-    if _pool is None:
+    if _pool is None or getattr(_pool, "closed", False):
         _pool = AsyncConnectionPool(
             conninfo=settings.NEON_DATABASE_URL,
             min_size=1,
@@ -33,6 +33,11 @@ async def get_pool() -> AsyncConnectionPool:
             timeout=30,
             kwargs={"autocommit": True},
             configure=_configure_connection,
+            # Validate each connection before handing it out. Neon free tier
+            # auto-suspends idle compute; without this, the pool keeps zombie
+            # connections that fail with "terminating connection due to
+            # administrator command" the first time they're reused.
+            check=AsyncConnectionPool.check_connection,
             open=False,
         )
         await _pool.open()

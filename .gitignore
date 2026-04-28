@@ -39,3 +39,5 @@ Thumbs.db
 *.swp
 *.swo
 /docs
+scripts/README.md
+/scripts

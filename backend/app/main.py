@@ -10,6 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.admin import router as admin_router
 from app.config import settings
 from app.db import close_pool, get_pool, healthcheck, run_migrations
+from app.run import router as run_router
+from app.services.hera_api import (
+    close_client as close_hera_api_client,
+)
+from app.services.hera_api import (
+    ensure_placeholder as ensure_hera_mock_placeholder,
+)
 from app.services.hera_dashboard import close_client as close_hera_client
 
 logging.basicConfig(
@@ -24,10 +31,13 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     log.info("Starting up — connecting to Neon and running migrations")
     await get_pool()
     await run_migrations()
+    if settings.HERA_MOCK:
+        await ensure_hera_mock_placeholder()
     log.info("Migrations done. Mock mode: %s", settings.HERA_MOCK)
     yield
     log.info("Shutting down — closing DB pool and HTTP clients")
     await close_hera_client()
+    await close_hera_api_client()
     await close_pool()
 
 
@@ -46,6 +56,7 @@ app.add_middleware(
 )
 
 app.include_router(admin_router)
+app.include_router(run_router)
 
 
 @app.get("/health")
