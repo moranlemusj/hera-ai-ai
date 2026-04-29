@@ -89,6 +89,32 @@ def _format_arc(arc: list[dict[str, Any]] | None, current_idx: int) -> str:
     return "\n".join(lines)
 
 
+def _format_attempts(attempts: list[dict[str, Any]] | None) -> str:
+    """Render prior critic attempts so the model can spot capability limits.
+
+    Some critiques recur across attempts even after substantive prompt edits —
+    e.g. a specific recognizable building Hera can't render, an icon style it
+    doesn't have. The critic should accept the shot in those cases instead of
+    looping forever. We give it the history so it can recognize the pattern.
+    """
+    if not attempts:
+        return "(this is the first attempt for this shot)"
+    lines: list[str] = []
+    for i, a in enumerate(attempts, start=1):
+        strategy = a.get("strategy", "?")
+        prompt = (a.get("prompt") or "")[:240]
+        diag = a.get("diagnosis") or {}
+        notes = (diag.get("notes") or "")[:240]
+        score = diag.get("overall_score")
+        score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "?"
+        lines.append(
+            f"  Attempt {i} (strategy={strategy}, score={score_str}):\n"
+            f"    prompt: {prompt!r}\n"
+            f"    critic notes: {notes!r}"
+        )
+    return "\n".join(lines)
+
+
 # Limit to the most recent 2 prior shots — past that, signal-to-noise drops
 # and the multimodal payload grows expensive. Two frames are enough to anchor
 # palette/typography continuity without overweighting older shots.
@@ -171,6 +197,9 @@ async def grade_shot(
             "as 'n/a'.\n"
         )
 
+        prior_attempts = list(shot.get("attempts") or [])
+        attempts_block = _format_attempts(prior_attempts)
+
         prompt = (
             "You are a strict but fair motion-graphics quality critic, judging "
             "both individual shot quality AND how well a shot fits its sequence.\n\n"
@@ -178,7 +207,9 @@ async def grade_shot(
             f"PLANNED ARC:\n{_format_arc(arc, current_idx)}\n\n"
             f"CURRENT SHOT TARGET: {shot.get('target_description', '(unspecified)')}\n"
             f"CURRENT SHOT KIND: {shot.get('kind', '(unspecified)')}\n"
-            f"{prior_block}"
+            f"{prior_block}\n"
+            "PRIOR ATTEMPTS ON THIS SHOT (oldest first):\n"
+            f"{attempts_block}\n\n"
             "Grade the CURRENT shot against the rubric. Be specific in `notes` "
             "(e.g. \"text illegible at frame 25%\", \"palette diverges from prior "
             "shot — switches from cool blues to warm reds without motivation\"). "
@@ -186,7 +217,19 @@ async def grade_shot(
             "stylistic deviations from a perfect ideal should still score well. "
             "`narrative_fit` should be 'weak' or 'off_topic' if the shot doesn't "
             "advance the planned arc; `visual_consistency` should be 'weak' if "
-            "the look departs from earlier shots without an obvious story reason."
+            "the look departs from earlier shots without an obvious story reason.\n\n"
+            "CAPABILITY-LIMIT GRACE: if the prior attempts show that the SAME core "
+            "issue (e.g. a specific recognizable subject the renderer keeps mangling, "
+            "an icon style it can't produce, a typographic effect it lacks) was "
+            "flagged 2+ times across attempts that meaningfully edited the prompt or "
+            "switched template, treat it as a capability limit of the underlying "
+            "renderer rather than a fixable defect. In that case, set "
+            "`overall_score` to 0.7 or higher, keep the rubric fields honest "
+            "(e.g. `composition: weak` if it really is weak), and explicitly note "
+            "in `notes` something like \"accepting under capability-limit grace: "
+            "<the recurring issue> has now been flagged across N attempts despite "
+            "prompt/template changes\". Do NOT invoke this grace on the very first "
+            "attempt or when the prompt edits between attempts were trivial."
         )
 
         contents: list[Any] = [prompt]

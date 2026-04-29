@@ -20,30 +20,30 @@ class Settings(BaseSettings):
     HERA_MOCK: bool = Field(False, description="If true, returns canned mp4 URLs instead of calling Hera")
 
     # Quota guardrails — Hera plan is 200 videos / 100 images per month
-    MAX_RENDERS_PER_RUN: int = 4
+    MAX_RENDERS_PER_RUN: int = 12
     MONTHLY_RENDER_HARD_CAP: int = 200
     MONTHLY_RENDER_WARN_THRESHOLD: int = 180  # warn UI when within 20 of cap
 
     # Models
-    GEMINI_MODEL: str = "gemini-2.5-flash"
-    GEMINI_PRO_MODEL: str = "gemini-2.5-pro"
+    GEMINI_MODEL: str = "gemini-3-flash-preview"
+    GEMINI_PRO_MODEL: str = "gemini-3.1-pro-preview"
     EMBEDDING_MODEL: str = "gemini-embedding-001"
 
     # Run loop budgets
     ACCEPT_THRESHOLD: float = 0.7
-    MAX_ATTEMPTS_PER_SHOT: int = 4
+    MAX_ATTEMPTS_PER_SHOT: int = 3
     RESEARCH_BUDGET: int = 3
-    MAX_REPLANS: int = 2
+    MAX_REPLANS: int = 12
     DURATION_FILTER_BUFFER_SECONDS: float = 5.0  # ± window when filtering templates by duration
     RENDER_TIMEOUT_SECONDS: int = 1200  # Hera renders can take 3-5 min on busy days, esp. complex templates
-    POLL_INTERVAL_SECONDS: int = 5
+    POLL_INTERVAL_SECONDS: int = 10
 
     # Output defaults
-    DEFAULT_ASPECT_RATIO: str = "16:9"
+    DEFAULT_ASPECT_RATIO: str = "9:16"
     DEFAULT_FPS: int = 30
-    DEFAULT_RESOLUTION: str = "1080p"
+    DEFAULT_RESOLUTION: str = "720p"
     DEFAULT_SHOT_DURATION: float = 5.0
-    TARGET_TOTAL_DURATION: float = 15.0
+    TARGET_TOTAL_DURATION: float = 90
 
     # Templates scrape
     TEMPLATE_CATEGORIES: list[str] = [
