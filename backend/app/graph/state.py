@@ -68,10 +68,13 @@ class Shot(TypedDict, total=False):
     video_id: str | None
     download_url: str | None
     local_path: str | None
-    # v1 fields (unused in v0)
+    # v1 fields
     score: float | None
     diagnosis: dict[str, Any] | None
     attempts: list[dict[str, Any]]
+    # Strategist outputs from the last attempt — surfaced to the UI.
+    last_strategy: str | None
+    last_strategy_rationale: str | None
 
 
 class Source(TypedDict):
@@ -102,10 +105,14 @@ class State(TypedDict, total=False):
     shot_list: list[Shot]
     current_shot_idx: int
 
-    # Iteration (unused in v0)
+    # Iteration
     revision_log: list[dict[str, Any]]
     coherence_diagnoses: list[dict[str, Any]]
     escalation_question: str | None
+    pending_coherence_edits: list[dict[str, Any]]
+    replans: int
+    # Per-replanner-pass record so the SSE handler can emit replan_applied.
+    last_replan_edited_indices: list[int]
 
     # 401 interrupt flag
     pending_session_refresh: bool

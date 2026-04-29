@@ -3,6 +3,7 @@ import { toast } from "sonner"
 import { AgentTimeline } from "@/components/AgentTimeline"
 import { QuotaInterruptDialog } from "@/components/QuotaInterruptDialog"
 import { ShotCard } from "@/components/ShotCard"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -10,7 +11,19 @@ import { Label } from "@/components/ui/label"
 import { Separator } from "@/components/ui/separator"
 import { Textarea } from "@/components/ui/textarea"
 import { useEventStream } from "@/hooks/useEventStream"
-import type { AgentEvent, ShotStatus } from "@/types/agent"
+import { cn } from "@/lib/utils"
+import type {
+  AgentEvent,
+  CriticDiagnosis,
+  ShotStatus,
+  StrategistStrategy,
+} from "@/types/agent"
+
+interface AttemptTrace {
+  attempt: number
+  strategy: StrategistStrategy
+  rationale: string
+}
 
 interface ShotState {
   idx: number
@@ -18,6 +31,16 @@ interface ShotState {
   templateTitle: string | null
   templatePickedReason: string | null
   videoId: string | null
+  score: number | null
+  diagnosis: CriticDiagnosis | null
+  attempts: AttemptTrace[]
+}
+
+interface CoherenceTrace {
+  after_idx: number
+  coherent: boolean
+  reason: string
+  suggested_edits_count: number
 }
 
 interface QuotaInterrupt {
@@ -34,6 +57,8 @@ interface RunState {
   errors: string[]
   finalVideoUrl: string | null
   quotaInterrupt: QuotaInterrupt | null
+  coherence: CoherenceTrace[]
+  replans: number
 }
 
 type RunAction =
@@ -50,6 +75,8 @@ const initialState: RunState = {
   errors: [],
   finalVideoUrl: null,
   quotaInterrupt: null,
+  coherence: [],
+  replans: 0,
 }
 
 function reducer(state: RunState, action: RunAction): RunState {
@@ -70,15 +97,65 @@ function reducer(state: RunState, action: RunAction): RunState {
         }
         case "shot_status": {
           const shots = new Map(state.shots)
+          const prior = shots.get(ev.idx)
           shots.set(ev.idx, {
             idx: ev.idx,
             status: ev.status,
             templateTitle: ev.template_title,
             templatePickedReason: ev.template_picked_reason,
             videoId: ev.video_id,
+            // Score/diagnosis ride along on shot_status updates from the critic.
+            score: ev.score ?? prior?.score ?? null,
+            diagnosis: ev.diagnosis ?? prior?.diagnosis ?? null,
+            // Preserve the appended attempts trail across status updates;
+            // the actual append happens in critic_diagnosis / strategist_decision.
+            attempts: prior?.attempts ?? [],
           })
           return { ...state, shots }
         }
+        case "critic_diagnosis": {
+          const shots = new Map(state.shots)
+          const prior = shots.get(ev.idx)
+          if (!prior) return state
+          shots.set(ev.idx, {
+            ...prior,
+            score: ev.score,
+            diagnosis: ev.diagnosis,
+          })
+          return { ...state, shots }
+        }
+        case "strategist_decision": {
+          const shots = new Map(state.shots)
+          const prior = shots.get(ev.idx)
+          if (!prior) return state
+          shots.set(ev.idx, {
+            ...prior,
+            attempts: [
+              ...prior.attempts,
+              {
+                attempt: ev.attempt,
+                strategy: ev.strategy,
+                rationale: ev.rationale,
+              },
+            ],
+          })
+          return { ...state, shots }
+        }
+        case "coherence_diagnosis":
+          return {
+            ...state,
+            coherence: [
+              ...state.coherence,
+              {
+                after_idx: ev.after_idx,
+                coherent: ev.coherent,
+                reason: ev.reason,
+                suggested_edits_count: ev.suggested_edits_count,
+              },
+            ],
+          }
+        case "replan_applied":
+          return { ...state, replans: ev.replans_total }
         case "log":
           return ev.level === "error"
             ? { ...state, errors: [...state.errors, ev.message] }
@@ -231,12 +308,55 @@ export function RunPage() {
                     templateTitle={shot.templateTitle}
                     templatePickedReason={shot.templatePickedReason}
                     videoId={shot.videoId}
+                    score={shot.score}
+                    diagnosis={shot.diagnosis}
+                    attempts={shot.attempts}
                   />
                 ))
               )}
             </div>
           </div>
         </>
+      )}
+
+      {run.coherence.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Coherence checks</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-1.5 text-sm">
+            {run.coherence.map((c, i) => (
+              <div
+                key={i}
+                className="flex items-start justify-between gap-3 rounded-md border bg-card px-3 py-1.5"
+              >
+                <div className="flex-1">
+                  <p className="text-xs">
+                    <span className="text-muted-foreground">After shot {c.after_idx + 1}:</span>{" "}
+                    {c.reason}
+                  </p>
+                </div>
+                <Badge
+                  className={cn(
+                    "shrink-0 text-xs",
+                    c.coherent
+                      ? "bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-200"
+                      : "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200",
+                  )}
+                >
+                  {c.coherent
+                    ? "coherent"
+                    : `replanning (${c.suggested_edits_count} edit${c.suggested_edits_count === 1 ? "" : "s"})`}
+                </Badge>
+              </div>
+            ))}
+            {run.replans > 0 && (
+              <p className="pt-1 text-xs text-muted-foreground">
+                {run.replans} replan{run.replans === 1 ? "" : "s"} applied
+              </p>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {run.errors.length > 0 && (

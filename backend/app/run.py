@@ -133,14 +133,92 @@ async def _stream_graph(
                                     "video_id": shot.get("video_id"),
                                     "template_title": shot.get("template_title"),
                                     "template_id": shot.get("template_id"),
-                                    "template_picked_reason": shot.get("template_picked_reason"),
+                                    "template_picked_reason": shot.get(
+                                        "template_picked_reason"
+                                    ),
+                                    "score": shot.get("score"),
+                                    "diagnosis": shot.get("diagnosis"),
+                                    "attempts_count": len(shot.get("attempts") or []),
+                                    "last_strategy": shot.get("last_strategy"),
+                                    "last_strategy_rationale": shot.get(
+                                        "last_strategy_rationale"
+                                    ),
                                 }
                             )
+                    # Loop A — emit critic + strategist events when those nodes fired.
+                    # Find the most-recently-touched shot (the one the node just
+                    # acted on; we don't have current_shot_idx in the patch).
+                    if node_name == "critic" and "shot_list" in update:
+                        graded = next(
+                            (
+                                s for s in reversed(update["shot_list"])
+                                if s.get("attempts")
+                            ),
+                            None,
+                        )
+                        if graded is not None:
+                            yield _event(
+                                {
+                                    "type": "critic_diagnosis",
+                                    "idx": graded.get("idx"),
+                                    "score": graded.get("score"),
+                                    "diagnosis": graded.get("diagnosis"),
+                                    "attempts_count": len(graded["attempts"]),
+                                }
+                            )
+                    if node_name == "strategist" and "shot_list" in update:
+                        decided = next(
+                            (
+                                s for s in reversed(update["shot_list"])
+                                if s.get("last_strategy")
+                            ),
+                            None,
+                        )
+                        if decided is not None:
+                            yield _event(
+                                {
+                                    "type": "strategist_decision",
+                                    "idx": decided.get("idx"),
+                                    "strategy": decided.get("last_strategy"),
+                                    "rationale": decided.get(
+                                        "last_strategy_rationale", ""
+                                    ),
+                                    "attempt": len(decided.get("attempts") or []),
+                                }
+                            )
+                    # Loop B — coherence verdict.
+                    if node_name == "coherence_check" and update.get(
+                        "coherence_diagnoses"
+                    ):
+                        latest = update["coherence_diagnoses"][-1]
+                        yield _event(
+                            {
+                                "type": "coherence_diagnosis",
+                                "after_idx": latest.get("after_idx"),
+                                "coherent": latest.get("coherent"),
+                                "reason": latest.get("reason"),
+                                "suggested_edits_count": len(
+                                    latest.get("suggested_edits") or []
+                                ),
+                            }
+                        )
+                    if node_name == "replanner" and update.get(
+                        "last_replan_edited_indices"
+                    ):
+                        yield _event(
+                            {
+                                "type": "replan_applied",
+                                "edited_indices": update["last_replan_edited_indices"],
+                                "replans_total": update.get("replans"),
+                            }
+                        )
                     if update.get("final_video_path"):
                         yield _event(
                             {
                                 "type": "done",
-                                "final_video_url": _video_url_for(update["final_video_path"]),
+                                "final_video_url": _video_url_for(
+                                    update["final_video_path"]
+                                ),
                                 "final_video_path": update["final_video_path"],
                             }
                         )

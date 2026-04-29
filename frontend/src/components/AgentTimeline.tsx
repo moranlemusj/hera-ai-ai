@@ -7,6 +7,10 @@ const NODE_ORDER = [
   "planner",
   "render_one",
   "poll_one",
+  "critic",
+  "strategist",
+  "coherence_check",
+  "replanner",
   "assemble",
 ] as const
 
@@ -18,6 +22,10 @@ const NODE_LABELS: Record<NodeName, string> = {
   planner: "Planner",
   render_one: "Render shot",
   poll_one: "Poll shot",
+  critic: "Critic",
+  strategist: "Strategist",
+  coherence_check: "Coherence check",
+  replanner: "Replanner",
   assemble: "Assemble",
 }
 

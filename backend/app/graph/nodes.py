@@ -1,8 +1,9 @@
-"""LangGraph nodes for the v0 minimal agent.
+"""LangGraph nodes for the v1 agent.
 
 Each node is a pure async function that takes State and returns a partial
-state update (LangGraph merges it). No critic/strategist/coherence here —
-v1.
+state update (LangGraph merges it). v1 adds the agentic loops:
+  Loop A — critic → strategist → render (per shot)
+  Loop B — coherence_check → replanner (between shots)
 """
 
 from __future__ import annotations
@@ -17,7 +18,15 @@ from typing import Any
 from langgraph.types import interrupt
 
 from app.config import settings
-from app.services import hera_api, planner, render_cache, stitch
+from app.services import (
+    coherence,
+    critic,
+    hera_api,
+    planner,
+    render_cache,
+    stitch,
+    strategist,
+)
 from app.services.jina import ArticleFetchError, fetch_article
 
 log = logging.getLogger(__name__)
@@ -101,9 +110,15 @@ async def planner_node(state: dict[str, Any]) -> dict[str, Any]:
 
     shot_list: list[dict[str, Any]] = []
 
-    # Run template selection in parallel — independent calls.
+    # Run template selection in parallel — independent calls. Pass the whole
+    # outline as `arc` so each shot's prompt is built with awareness of its
+    # neighbors, not in isolation.
+    arc = [{"idx": i, **s} for i, s in enumerate(shots_raw)]
     decisions = await asyncio.gather(
-        *[planner.pick_template_for_shot(s) for s in shots_raw],
+        *[
+            planner.pick_template_for_shot({"idx": i, **s}, arc=arc)
+            for i, s in enumerate(shots_raw)
+        ],
         return_exceptions=True,
     )
 
@@ -126,6 +141,10 @@ async def planner_node(state: dict[str, Any]) -> dict[str, Any]:
                 "idx": idx,
                 "kind": shot["kind"],
                 "target_description": shot["target_description"],
+                # Carry the planner's per-shot rationale through so re-picks
+                # (strategist's switch_template, replanner) can pass the shot
+                # back to pick_template_for_shot without a KeyError.
+                "rationale": shot.get("rationale", ""),
                 "prompt": shot_prompt,
                 "aspect_ratio": settings.DEFAULT_ASPECT_RATIO,
                 "duration_seconds": float(shot["duration_seconds"]),
@@ -267,12 +286,10 @@ async def poll_one(state: dict[str, Any]) -> dict[str, Any]:
     shot = dict(shot_list[idx])
 
     if shot["status"] == "ready" and shot.get("local_path"):
-        # Cache hit path — already done.
+        # Cache hit path — already downloaded; the critic still gets a swing
+        # at it for consistency with the v1 graph.
         shot_list[idx] = shot
-        return {
-            "shot_list": shot_list,
-            "current_shot_idx": idx + 1,
-        }
+        return {"shot_list": shot_list}
 
     video_id = shot["video_id"]
     deadline = (
@@ -330,9 +347,199 @@ async def poll_one(state: dict[str, Any]) -> dict[str, Any]:
         await asyncio.sleep(settings.POLL_INTERVAL_SECONDS)
 
     shot_list[idx] = shot
+    return {"shot_list": shot_list}
+
+
+# ---------------------------------------------------------------------------
+# critic — Loop A entry: grade the rendered shot
+# ---------------------------------------------------------------------------
+
+
+async def critic_node(state: dict[str, Any]) -> dict[str, Any]:
+    idx = state["current_shot_idx"]
+    shot_list: list[dict[str, Any]] = list(state["shot_list"])
+    shot = dict(shot_list[idx])
+
+    if not shot.get("local_path"):
+        # Render failed earlier — nothing to grade. Force-fail the shot.
+        log.warning("critic invoked without local_path for shot %d", idx)
+        shot["status"] = "failed"
+        shot_list[idx] = shot
+        return {"shot_list": shot_list, "error": "no rendered file to critique"}
+
+    # Collect mp4 paths from earlier approved shots so the critic can grade
+    # visual consistency against what actually rendered, not just the prompt.
+    prior_paths: list[Path] = []
+    for prior in shot_list[:idx]:
+        prior_path = prior.get("local_path")
+        if prior_path and prior.get("status") in {"approved", "ready"}:
+            prior_paths.append(Path(prior_path))
+
+    diagnosis = await critic.grade_shot(
+        Path(shot["local_path"]),
+        shot,
+        state.get("brief_summary", ""),
+        arc=shot_list,
+        prior_paths=prior_paths,
+    )
+
+    score = float(diagnosis.get("overall_score", 1.0))
+    shot["score"] = score
+    shot["diagnosis"] = diagnosis
+
+    attempts = list(shot.get("attempts") or [])
+    attempts.append(
+        {
+            "strategy": shot.get("last_strategy", "initial"),
+            "prompt": shot.get("prompt"),
+            "template_id": shot.get("template_id"),
+            "video_id": shot.get("video_id"),
+            "score": score,
+            "diagnosis": diagnosis,
+        }
+    )
+    shot["attempts"] = attempts
+    shot_list[idx] = shot
+    return {"shot_list": shot_list}
+
+
+# ---------------------------------------------------------------------------
+# strategist — Loop A intervention picker
+# ---------------------------------------------------------------------------
+
+
+async def strategist_node(state: dict[str, Any]) -> dict[str, Any]:
+    idx = state["current_shot_idx"]
+    shot_list: list[dict[str, Any]] = list(state["shot_list"])
+    shot = dict(shot_list[idx])
+
+    decision = await strategist.pick_strategy(shot, state.get("brief_summary", ""))
+    strat = decision["strategy"]
+    shot["last_strategy"] = strat
+    shot["last_strategy_rationale"] = decision.get("rationale", "")
+
+    if strat == "accept":
+        # current_shot_idx stays put so coherence_check (next node) sees this shot.
+        shot["status"] = "approved"
+        shot_list[idx] = shot
+        return {"shot_list": shot_list}
+    if strat == "escalate":
+        # Until Phase 8 lands a real interrupt, escalate ends the run with a
+        # clear error and a state.error → END route. No silent retries.
+        shot["status"] = "failed"
+        shot_list[idx] = shot
+        return {
+            "shot_list": shot_list,
+            "error": f"strategist escalated: {decision.get('rationale', '(no rationale)')}",
+        }
+    if strat == "rewrite_prompt":
+        shot["prompt"] = decision["shot_prompt"]
+        shot["video_id"] = None
+        shot["download_url"] = None
+        shot["local_path"] = None
+        shot["status"] = "rendering"
+    elif strat == "switch_template":
+        new_pick = await planner.pick_template_for_shot(
+            {**shot, "target_description": decision["target_description"]},
+            arc=shot_list,
+        )
+        tid = new_pick["template_id"]
+        shot["template_id"] = None if tid == "NONE" else tid
+        shot["template_title"] = new_pick.get("template_title")
+        shot["template_picked_reason"] = new_pick.get("rationale", "")
+        shot["target_description"] = decision["target_description"]
+        shot["prompt"] = new_pick["shot_prompt"]
+        shot["parent_kind"] = "template" if shot["template_id"] else None
+        shot["parent_video_id"] = shot["template_id"]
+        shot["video_id"] = None
+        shot["download_url"] = None
+        shot["local_path"] = None
+        shot["status"] = "rendering"
+    elif strat == "revise_via_parent":
+        prior_video_id = shot.get("video_id")
+        if prior_video_id:
+            shot["parent_video_id"] = prior_video_id
+            shot["parent_kind"] = "prior_render"
+        shot["prompt"] = decision["shot_prompt"]
+        shot["video_id"] = None
+        shot["download_url"] = None
+        shot["local_path"] = None
+        shot["status"] = "rendering"
+
+    shot_list[idx] = shot
+    return {"shot_list": shot_list}
+
+
+# ---------------------------------------------------------------------------
+# coherence_check — Loop B
+# ---------------------------------------------------------------------------
+
+
+async def coherence_check_node(state: dict[str, Any]) -> dict[str, Any]:
+    idx = state["current_shot_idx"]
+    shot_list: list[dict[str, Any]] = state["shot_list"]
+    rendered_paths = [
+        Path(s["local_path"])
+        for s in shot_list[: idx + 1]
+        if s.get("local_path")
+    ]
+
+    verdict = await coherence.check_coherence(
+        list(shot_list),
+        rendered_paths,
+        state.get("brief_summary", ""),
+        current_idx=idx,
+    )
+
+    diagnoses = list(state.get("coherence_diagnoses") or [])
+    diagnoses.append({"after_idx": idx, **verdict})
+
+    pending = verdict.get("suggested_edits") if not verdict.get("coherent") else []
+
+    return {
+        "coherence_diagnoses": diagnoses,
+        "pending_coherence_edits": pending,
+        # The shot just accepted — advance the cursor past it whether or not
+        # we replan downstream.
+        "current_shot_idx": idx + 1,
+    }
+
+
+# ---------------------------------------------------------------------------
+# replanner — applies coherence's suggested_edits to downstream shots
+# ---------------------------------------------------------------------------
+
+
+async def replanner_node(state: dict[str, Any]) -> dict[str, Any]:
+    edits = list(state.get("pending_coherence_edits") or [])
+    shot_list: list[dict[str, Any]] = list(state["shot_list"])
+    edited_indices: list[int] = []
+
+    for edit in edits:
+        target_idx = edit.get("idx")
+        if not isinstance(target_idx, int) or target_idx >= len(shot_list):
+            continue
+        shot = dict(shot_list[target_idx])
+        if edit.get("new_prompt"):
+            shot["prompt"] = edit["new_prompt"]
+        if edit.get("new_target_description"):
+            shot["target_description"] = edit["new_target_description"]
+            new_pick = await planner.pick_template_for_shot(shot, arc=shot_list)
+            tid = new_pick["template_id"]
+            shot["template_id"] = None if tid == "NONE" else tid
+            shot["template_title"] = new_pick.get("template_title")
+            shot["template_picked_reason"] = new_pick.get("rationale", "")
+            shot["prompt"] = new_pick["shot_prompt"]
+            shot["parent_kind"] = "template" if shot["template_id"] else None
+            shot["parent_video_id"] = shot["template_id"]
+        shot_list[target_idx] = shot
+        edited_indices.append(target_idx)
+
     return {
         "shot_list": shot_list,
-        "current_shot_idx": idx + 1,
+        "pending_coherence_edits": [],
+        "replans": (state.get("replans") or 0) + 1,
+        "last_replan_edited_indices": edited_indices,
     }
 
 

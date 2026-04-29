@@ -31,10 +31,11 @@ class Settings(BaseSettings):
 
     # Run loop budgets
     ACCEPT_THRESHOLD: float = 0.7
-    MAX_ATTEMPTS_PER_SHOT: int = 1  # bumped to 3 for v1 demo runs
+    MAX_ATTEMPTS_PER_SHOT: int = 4
     RESEARCH_BUDGET: int = 3
     MAX_REPLANS: int = 2
-    RENDER_TIMEOUT_SECONDS: int = 90  # Hera renders can take 3-5 min on busy days, esp. complex templates
+    DURATION_FILTER_BUFFER_SECONDS: float = 5.0  # ± window when filtering templates by duration
+    RENDER_TIMEOUT_SECONDS: int = 1200  # Hera renders can take 3-5 min on busy days, esp. complex templates
     POLL_INTERVAL_SECONDS: int = 5
 
     # Output defaults
@@ -42,7 +43,7 @@ class Settings(BaseSettings):
     DEFAULT_FPS: int = 30
     DEFAULT_RESOLUTION: str = "1080p"
     DEFAULT_SHOT_DURATION: float = 5.0
-    TARGET_TOTAL_DURATION: float = 30.0
+    TARGET_TOTAL_DURATION: float = 15.0
 
     # Templates scrape
     TEMPLATE_CATEGORIES: list[str] = [

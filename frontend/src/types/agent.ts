@@ -9,6 +9,16 @@ export type ShotStatus =
   | "approved"
   | "failed"
 
+export interface CriticDiagnosis {
+  composition: "ok" | "weak"
+  typography: "ok" | "weak"
+  motion: "ok" | "weak" | "jittery"
+  color: "ok" | "weak" | "off_brand"
+  text_legibility: "ok" | "weak"
+  overall_score: number
+  notes: string
+}
+
 export interface ShotStatusEvent {
   type: "shot_status"
   idx: number
@@ -17,6 +27,51 @@ export interface ShotStatusEvent {
   template_title: string | null
   template_id: string | null
   template_picked_reason: string | null
+  // v1 fields
+  score: number | null
+  diagnosis: CriticDiagnosis | null
+  attempts_count: number
+  last_strategy: string | null
+  last_strategy_rationale: string | null
+}
+
+export interface CriticDiagnosisEvent {
+  type: "critic_diagnosis"
+  idx: number
+  score: number
+  diagnosis: CriticDiagnosis
+  attempts_count: number
+}
+
+export type StrategistStrategy =
+  | "rewrite_prompt"
+  | "switch_template"
+  | "revise_via_parent"
+  | "accept"
+  | "escalate"
+  // Sentinel for the very first attempt before any strategy was chosen.
+  | "initial"
+
+export interface StrategistDecisionEvent {
+  type: "strategist_decision"
+  idx: number
+  strategy: StrategistStrategy
+  rationale: string
+  attempt: number
+}
+
+export interface CoherenceDiagnosisEvent {
+  type: "coherence_diagnosis"
+  after_idx: number
+  coherent: boolean
+  reason: string
+  suggested_edits_count: number
+}
+
+export interface ReplanAppliedEvent {
+  type: "replan_applied"
+  edited_indices: number[]
+  replans_total: number
 }
 
 export interface NodeExitEvent {
@@ -81,5 +136,9 @@ export type AgentEvent =
   | LogEvent
   | InterruptEvent
   | DoneEvent
+  | CriticDiagnosisEvent
+  | StrategistDecisionEvent
+  | CoherenceDiagnosisEvent
+  | ReplanAppliedEvent
 
 export type ScrapeEvent = ScrapeProgressEvent | ScrapeDoneEvent | ScrapeErrorEvent

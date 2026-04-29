@@ -8,7 +8,6 @@ Two passes:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -18,6 +17,7 @@ from google.genai import types as genai_types
 
 from app.config import settings
 from app.graph.state import SHOT_KIND_CATEGORIES, SHOT_KINDS
+from app.services._gemini_retry import gemini_call
 from app.services.templates import find_templates
 
 log = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def _build_outline_schema(min_shots: int, max_shots: int) -> dict[str, Any]:
                     "properties": {
                         "kind": {"type": "string", "enum": SHOT_KINDS},
                         "target_description": {"type": "string"},
-                        "duration_seconds": {"type": "number"},
+                        "duration_seconds": {"type": "number", "minimum": 3, "maximum": 5},
                         "rationale": {"type": "string"},
                     },
                     "required": [
@@ -113,7 +113,7 @@ def _build_outline_prompt(
         "Each shot must have:",
         f"- kind: one of {', '.join(SHOT_KINDS)}",
         "- target_description: ONE sentence describing what the shot should look like",
-        "- duration_seconds: between 3 and 8",
+        "- duration_seconds: between 3 and 5",
         "- rationale: ONE sentence on why this shot, why this kind",
         "",
         f"Aim for a total duration around {target_total_duration:.0f}s (±50%); do not pad shots to fill time if "
@@ -132,12 +132,35 @@ def _build_outline_prompt(
     return "\n".join(parts)
 
 
-def _build_pick_prompt(shot: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+def _format_arc(arc: list[dict[str, Any]] | None, current_idx: int) -> str:
+    if not arc:
+        return "(arc unavailable)"
+    lines: list[str] = []
+    for s in arc:
+        idx = s.get("idx", "?")
+        kind = s.get("kind", "?")
+        target = s.get("target_description", "(no description)")
+        marker = "  ← CURRENT" if idx == current_idx else ""
+        lines.append(f"  Shot {idx} ({kind}): {target}{marker}")
+    return "\n".join(lines)
+
+
+def _build_pick_prompt(
+    shot: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    *,
+    arc: list[dict[str, Any]] | None = None,
+) -> str:
     parts = [
         "Pick the best template for this shot, OR pick 'NONE' if no candidate is a strong match.",
-        f"Shot kind: {shot['kind']}",
-        f"Shot target: {shot['target_description']}",
-        f"Shot rationale: {shot['rationale']}",
+        "",
+        "PLANNED ARC (for narrative continuity — the shot_prompt you produce",
+        "should fit naturally between its neighbors):",
+        _format_arc(arc, int(shot.get("idx", -1))),
+        "",
+        f"CURRENT shot kind: {shot['kind']}",
+        f"CURRENT shot target: {shot['target_description']}",
+        f"CURRENT shot rationale: {shot.get('rationale', '(none)')}",
         "",
         "Candidates (top-3 by hybrid search):",
     ]
@@ -161,18 +184,16 @@ async def _gemini_json(
     client = _get_client()
     used_model = model or settings.GEMINI_MODEL
 
-    def _call() -> Any:
-        return client.models.generate_content(
-            model=used_model,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=schema,
-                temperature=0.4,
-            ),
-        )
-
-    resp = await asyncio.to_thread(_call)
+    resp = await gemini_call(
+        client.models.generate_content,
+        model=used_model,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=schema,
+            temperature=0.4,
+        ),
+    )
     raw = resp.text or ""
     if not raw.strip():
         raise RuntimeError("Gemini returned empty body")
@@ -207,14 +228,29 @@ async def plan_outline(
     return await _gemini_json(prompt, schema)
 
 
-async def pick_template_for_shot(shot: dict[str, Any]) -> dict[str, Any]:
-    """Decide template_id ('NONE' allowed) + the final shot_prompt."""
+async def pick_template_for_shot(
+    shot: dict[str, Any],
+    *,
+    arc: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Decide template_id ('NONE' allowed) + the final shot_prompt.
+
+    The shot's `duration_seconds` is passed as a target so templates with
+    fixed durations far from the target are filtered out — otherwise the
+    planner can pick a 60s template for a 5s shot and blow run length.
+
+    `arc`, when provided, is the full planned shot list. Passing it lets the
+    Gemini call construct a `shot_prompt` that fits the surrounding narrative
+    instead of treating the shot in isolation — this is what stops one shot
+    drifting off-narrative on a re-pick.
+    """
     cats = _shot_kind_to_categories(shot["kind"])
     candidates = await find_templates(
         shot["target_description"],
         category_hints=cats,
         k=3,
         exclude_premium=True,
+        target_duration_seconds=shot.get("duration_seconds"),
     )
     if not candidates:
         # No templates in DB / category — fall back to prompt-only directly.
@@ -223,7 +259,7 @@ async def pick_template_for_shot(shot: dict[str, Any]) -> dict[str, Any]:
             "rationale": "No matching templates in the local catalog.",
             "shot_prompt": shot["target_description"],
         }
-    pick_prompt = _build_pick_prompt(shot, candidates)
+    pick_prompt = _build_pick_prompt(shot, candidates, arc=arc)
     decision = await _gemini_json(pick_prompt, PICK_SCHEMA)
     # Validate the chosen template_id is one of the candidates (or NONE)
     valid_ids = {c["task_prompt_id"] for c in candidates}

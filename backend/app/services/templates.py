@@ -339,6 +339,7 @@ async def find_templates(
     category_hints: list[str] | None = None,
     k: int = 3,
     exclude_premium: bool = True,
+    target_duration_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     """Hybrid template search.
 
@@ -346,6 +347,15 @@ async def find_templates(
     1. Inner query: pure ANN — `ORDER BY embedding <=> qvec LIMIT k * 5`
     2. Outer query: rescore the candidates with cosine + popularity + trigram
        and re-order to the final top-k.
+
+    If `target_duration_seconds` is given, candidates are pre-filtered to those
+    whose template duration is compatible:
+      - "AUTO" templates always pass (they pick their own length)
+      - missing/null durationSeconds passes (older entries)
+      - numeric durationSeconds within ±DURATION_FILTER_BUFFER_SECONDS of target
+
+    Without this filter the planner can pick a 60-second template for a
+    5-second shot, blowing the run length way past the budget.
     """
     if not description.strip():
         return []
@@ -364,6 +374,17 @@ async def find_templates(
           AND embedding IS NOT NULL
           AND (%(cats)s::text[] IS NULL OR category = ANY(%(cats)s))
           AND (%(exclude_premium)s = FALSE OR is_premium = FALSE)
+          AND (
+            %(target_dur)s::numeric IS NULL
+            OR config->>'durationSeconds' = 'AUTO'
+            OR config->>'durationSeconds' IS NULL
+            OR (
+              config->>'durationSeconds' ~ '^[0-9]+(\\.[0-9]+)?$'
+              AND (config->>'durationSeconds')::numeric
+                  BETWEEN %(target_dur)s::numeric - %(buf)s::numeric
+                      AND %(target_dur)s::numeric + %(buf)s::numeric
+            )
+          )
         ORDER BY embedding <=> %(qvec)s
         LIMIT %(prefetch)s
     )
@@ -388,6 +409,8 @@ async def find_templates(
         "qtext": description,
         "cats": category_hints,
         "exclude_premium": exclude_premium,
+        "target_dur": target_duration_seconds,
+        "buf": settings.DURATION_FILTER_BUFFER_SECONDS,
         "w_sim": settings.SEARCH_WEIGHT_SIM,
         "w_pop": settings.SEARCH_WEIGHT_POPULAR,
         "w_trgm": settings.SEARCH_WEIGHT_TRGM,
