@@ -16,7 +16,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/run": { target: BACKEND, changeOrigin: true },
+      // Exact-match /run so it doesn't swallow /runs/{thread_id} (which is a
+      // React Router route served by index.html).
+      "^/run$": { target: BACKEND, changeOrigin: true },
+      "/api": { target: BACKEND, changeOrigin: true },
       "/resume": { target: BACKEND, changeOrigin: true },
       "/video": { target: BACKEND, changeOrigin: true },
       "/admin": { target: BACKEND, changeOrigin: true },

@@ -276,3 +276,38 @@ async def get_video(run_id: str) -> FileResponse:
     if not final_path.exists():
         raise HTTPException(404, f"No final video for run_id={run_id}")
     return FileResponse(final_path, media_type="video/mp4", filename=f"{run_id}.mp4")
+
+
+@router.get("/api/runs/{thread_id}")
+async def get_run_snapshot(thread_id: str) -> dict[str, Any]:
+    """Return the persisted state of a past run so the UI can replay it.
+
+    Reads the latest LangGraph checkpoint for ``thread_id`` and returns a
+    JSON snapshot the frontend can reduce into the same shape a live SSE
+    stream would produce. Useful for re-opening a run by URL without
+    re-running the agent.
+    """
+    graph = await get_compiled_graph()
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    snapshot = await graph.aget_state(config)
+    values = snapshot.values if snapshot is not None else None
+    if not values:
+        raise HTTPException(404, f"No checkpoint for thread_id={thread_id}")
+
+    final_video_path = values.get("final_video_path")
+    final_video_url = _video_url_for(final_video_path) if final_video_path else None
+
+    return {
+        "thread_id": thread_id,
+        "run_id": values.get("run_id"),
+        "input_mode": values.get("input_mode"),
+        "user_prompt": values.get("user_prompt"),
+        "source_url": values.get("source_url"),
+        "brief_summary": values.get("brief_summary"),
+        "shot_list": values.get("shot_list") or [],
+        "coherence_diagnoses": values.get("coherence_diagnoses") or [],
+        "replans": values.get("replans") or 0,
+        "final_video_path": final_video_path,
+        "final_video_url": final_video_url,
+        "error": values.get("error"),
+    }

@@ -15,6 +15,7 @@ createRoot(root).render(
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<RunPage />} />
+          <Route path="runs/:threadId" element={<RunPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>

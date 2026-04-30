@@ -1,4 +1,5 @@
-import { useCallback, useMemo, useReducer, useState } from "react"
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react"
+import { useParams } from "react-router-dom"
 import { toast } from "sonner"
 import { AgentTimeline } from "@/components/AgentTimeline"
 import { QuotaInterruptDialog } from "@/components/QuotaInterruptDialog"
@@ -18,6 +19,46 @@ import type {
   ShotStatus,
   StrategistStrategy,
 } from "@/types/agent"
+
+// Shape returned by GET /runs/{thread_id} — mirrors what the backend reads
+// out of the LangGraph checkpoint.
+interface RunSnapshot {
+  thread_id: string
+  run_id: string | null
+  shot_list: PersistedShot[]
+  coherence_diagnoses: PersistedCoherenceDiagnosis[]
+  replans: number
+  final_video_url: string | null
+  error: string | null
+}
+
+interface PersistedAttempt {
+  strategy?: StrategistStrategy
+  rationale?: string
+  prompt?: string
+  template_id?: string | null
+  video_id?: string | null
+  score?: number
+  diagnosis?: CriticDiagnosis
+}
+
+interface PersistedShot {
+  idx: number
+  status: ShotStatus
+  template_title?: string | null
+  template_picked_reason?: string | null
+  video_id?: string | null
+  score?: number | null
+  diagnosis?: CriticDiagnosis | null
+  attempts?: PersistedAttempt[]
+}
+
+interface PersistedCoherenceDiagnosis {
+  after_idx: number
+  coherent: boolean
+  reason: string
+  suggested_edits?: unknown[]
+}
 
 interface AttemptTrace {
   attempt: number
@@ -66,6 +107,60 @@ type RunAction =
   | { type: "thread_id"; value: string }
   | { type: "event"; event: AgentEvent }
   | { type: "clear_quota_interrupt" }
+  | { type: "populate_from_snapshot"; snapshot: RunSnapshot }
+
+// Names of every node in the v1 graph; the timeline uses this set to render
+// the progression bar. Keep in sync with backend graph/build.py.
+const ALL_NODES = [
+  "intake",
+  "fetch_article",
+  "planner",
+  "render_one",
+  "poll_one",
+  "critic",
+  "strategist",
+  "coherence_check",
+  "replanner",
+  "assemble",
+] as const
+
+function snapshotToRunState(snapshot: RunSnapshot): RunState {
+  const shots = new Map<number, ShotState>()
+  for (const s of snapshot.shot_list) {
+    const attempts: AttemptTrace[] = (s.attempts ?? []).map((a, i) => ({
+      attempt: i + 1,
+      strategy: a.strategy ?? "initial",
+      rationale: a.rationale ?? "",
+    }))
+    shots.set(s.idx, {
+      idx: s.idx,
+      status: s.status,
+      templateTitle: s.template_title ?? null,
+      templatePickedReason: s.template_picked_reason ?? null,
+      videoId: s.video_id ?? null,
+      score: s.score ?? null,
+      diagnosis: s.diagnosis ?? null,
+      attempts,
+    })
+  }
+  const coherence = snapshot.coherence_diagnoses.map((c) => ({
+    after_idx: c.after_idx,
+    coherent: c.coherent,
+    reason: c.reason,
+    suggested_edits_count: (c.suggested_edits ?? []).length,
+  }))
+  return {
+    threadId: snapshot.thread_id,
+    shots,
+    completedNodes: new Set(ALL_NODES),
+    currentNode: null,
+    errors: snapshot.error ? [snapshot.error] : [],
+    finalVideoUrl: snapshot.final_video_url,
+    quotaInterrupt: null,
+    coherence,
+    replans: snapshot.replans,
+  }
+}
 
 const initialState: RunState = {
   threadId: null,
@@ -87,6 +182,8 @@ function reducer(state: RunState, action: RunAction): RunState {
       return { ...state, threadId: action.value }
     case "clear_quota_interrupt":
       return { ...state, quotaInterrupt: null }
+    case "populate_from_snapshot":
+      return snapshotToRunState(action.snapshot)
     case "event": {
       const ev = action.event
       switch (ev.type) {
@@ -181,9 +278,45 @@ function reducer(state: RunState, action: RunAction): RunState {
 }
 
 export function RunPage() {
+  const { threadId: replayThreadId } = useParams<{ threadId: string }>()
+  const isReplay = Boolean(replayThreadId)
   const [userPrompt, setUserPrompt] = useState("")
   const [sourceUrl, setSourceUrl] = useState("")
   const [run, dispatch] = useReducer(reducer, initialState)
+  const [replayLoading, setReplayLoading] = useState(false)
+  const [replayError, setReplayError] = useState<string | null>(null)
+
+  // Replay mode: fetch the persisted state and pre-fill the reducer once.
+  useEffect(() => {
+    if (!replayThreadId) return
+    let cancelled = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- we genuinely need to enter loading state when the fetch kicks off
+    setReplayLoading(true)
+    setReplayError(null)
+    fetch(`/api/runs/${encodeURIComponent(replayThreadId)}`)
+      .then(async (resp) => {
+        if (!resp.ok) {
+          const text = await resp.text()
+          throw new Error(`HTTP ${resp.status}: ${text}`)
+        }
+        return (await resp.json()) as RunSnapshot
+      })
+      .then((snapshot) => {
+        if (cancelled) return
+        dispatch({ type: "populate_from_snapshot", snapshot })
+      })
+      .catch((err: Error) => {
+        if (cancelled) return
+        setReplayError(err.message)
+        toast.error(`Failed to load run: ${err.message}`)
+      })
+      .finally(() => {
+        if (!cancelled) setReplayLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [replayThreadId])
 
   const onEvent = useCallback((ev: AgentEvent) => {
     dispatch({ type: "event", event: ev })
@@ -237,54 +370,73 @@ export function RunPage() {
 
   return (
     <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Generate a motion graphic</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="prompt">Prompt (optional)</Label>
-            <Textarea
-              id="prompt"
-              placeholder="Make a 30s explainer about quarterly revenue trends, focus on the YoY growth..."
-              value={userPrompt}
-              onChange={(e) => setUserPrompt(e.target.value)}
-              rows={3}
-              disabled={streaming}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="url">Source URL (optional)</Label>
-            <Input
-              id="url"
-              type="url"
-              placeholder="https://www.bloomberg.com/..."
-              value={sourceUrl}
-              onChange={(e) => setSourceUrl(e.target.value)}
-              disabled={streaming}
-            />
-            <p className="text-xs text-muted-foreground">
-              Provide either a prompt, a URL, or both (the prompt acts as a lens
-              on the article).
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button onClick={start} disabled={!inputValid || streaming}>
-              {streaming ? "Running…" : "Run agent"}
-            </Button>
-            {streaming && (
-              <Button variant="outline" onClick={() => stream.abort()}>
-                Cancel
-              </Button>
-            )}
-          </div>
-          {run.threadId && (
+      {isReplay ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Replaying past run</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
             <p className="text-xs text-muted-foreground font-mono">
-              thread: {run.threadId}
+              thread: {replayThreadId}
             </p>
-          )}
-        </CardContent>
-      </Card>
+            {replayLoading && (
+              <p className="text-sm text-muted-foreground">Loading snapshot…</p>
+            )}
+            {replayError && (
+              <p className="text-destructive text-sm">{replayError}</p>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle>Generate a motion graphic</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="prompt">Prompt (optional)</Label>
+              <Textarea
+                id="prompt"
+                placeholder="Make a 30s explainer about quarterly revenue trends, focus on the YoY growth..."
+                value={userPrompt}
+                onChange={(e) => setUserPrompt(e.target.value)}
+                rows={3}
+                disabled={streaming}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="url">Source URL (optional)</Label>
+              <Input
+                id="url"
+                type="url"
+                placeholder="https://www.bloomberg.com/..."
+                value={sourceUrl}
+                onChange={(e) => setSourceUrl(e.target.value)}
+                disabled={streaming}
+              />
+              <p className="text-xs text-muted-foreground">
+                Provide either a prompt, a URL, or both (the prompt acts as a lens
+                on the article).
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={start} disabled={!inputValid || streaming}>
+                {streaming ? "Running…" : "Run agent"}
+              </Button>
+              {streaming && (
+                <Button variant="outline" onClick={() => stream.abort()}>
+                  Cancel
+                </Button>
+              )}
+            </div>
+            {run.threadId && (
+              <p className="text-xs text-muted-foreground font-mono">
+                thread: {run.threadId}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {(streaming || run.completedNodes.size > 0) && (
         <>

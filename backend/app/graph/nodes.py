@@ -391,6 +391,7 @@ async def critic_node(state: dict[str, Any]) -> dict[str, Any]:
     attempts.append(
         {
             "strategy": shot.get("last_strategy", "initial"),
+            "rationale": shot.get("last_strategy_rationale", ""),
             "prompt": shot.get("prompt"),
             "template_id": shot.get("template_id"),
             "video_id": shot.get("video_id"),
